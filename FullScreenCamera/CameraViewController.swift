@@ -18,7 +18,7 @@ class CameraViewController: UIViewController {
     let photoOutput = AVCapturePhotoOutput()
     
     let sessionQueue = DispatchQueue(label: "session Queue")
-    let videoDeviceDiscoverySession = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInDualCamera, .builtInTrueDepthCamera, .builtInTrueDepthCamera], mediaType: .video, position: .unspecified)
+    let videoDeviceDiscoverySession = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInDualCamera, .builtInWideAngleCamera, .builtInTrueDepthCamera], mediaType: .video, position: .unspecified)
     
 
     @IBOutlet weak var photoLibraryButton: UIButton!
@@ -33,7 +33,7 @@ class CameraViewController: UIViewController {
     
     override func viewDidLoad() {
         super.viewDidLoad()
-        // TODO: 초기 설정 2
+        // 초기 설정 2
         previewView.session = captureSession
         sessionQueue.async {
             self.setupSession()
@@ -50,32 +50,103 @@ class CameraViewController: UIViewController {
         
         captureButton.layer.cornerRadius = captureButton.bounds.height/2
         captureButton.layer.masksToBounds = true
+        
+        blurBGView.layer.cornerRadius = blurBGView.bounds.height/2
+        blurBGView.layer.masksToBounds = true
     }
     
     
     @IBAction func switchCamera(sender: Any) {
-        // TODO: 카메라는 1개 이상이어야함
+        // 카메라는 1개 이상이어야함
+        guard videoDeviceDiscoverySession.devices.count > 1 else {
+            return
+        }
         
-        
-        // TODO: 반대 카메라 찾아서 재설정
-        
+        // 반대 카메라 찾아서 재설정
+        // - 반대 카메라 찾고 새로운 디바이스를 가지고 세션을 업데이트
+        // - 카메라 토글 버튼 업데이트
+        sessionQueue.async {
+            let currentVideoDevice = self.videoDeviceInput.device
+            let currentPosition = currentVideoDevice.position
+            let isFront = currentPosition == .front
+            let preferredPosition: AVCaptureDevice.Position = isFront ? .back : .front
+            
+            let devices = self.videoDeviceDiscoverySession.devices
+            var newVideoDevice: AVCaptureDevice?
+            newVideoDevice = devices.first { $0.position == preferredPosition }
+            
+            // update captureSession
+            
+            if let newDevice = newVideoDevice {
+                do {
+                    let videoDeviceInput = try AVCaptureDeviceInput(device: newDevice)
+                    self.captureSession.beginConfiguration()
+                    self.captureSession.removeInput(self.videoDeviceInput)
+                    
+                    // add new device input
+                    if self.captureSession.canAddInput(videoDeviceInput) {
+                        self.captureSession.addInput(videoDeviceInput)
+                        self.videoDeviceInput = videoDeviceInput
+                    } else {
+                        self.captureSession.addInput(self.videoDeviceInput)
+                    }
+                
+                    self.captureSession.commitConfiguration()
+                    
+                    DispatchQueue.main.async {
+                        self.updateSwitchCameraIcon(position: preferredPosition)
+                    }
+                } catch let error {
+                    print("error occured while creating device input: \(error.localizedDescription)")
+                }
+            }
+        }
     }
     
     func updateSwitchCameraIcon(position: AVCaptureDevice.Position) {
-        // TODO: Update ICON
-        
-        
+        // Update ICON
+        switch position {
+        case.front:
+            let image = #imageLiteral(resourceName: "ic_camera_rear")
+            switchButton.setImage(image, for: .normal)
+        case.back:
+            let image = #imageLiteral(resourceName: "ic_camera_front")
+            switchButton.setImage(image, for: .normal)
+        default:
+            break
+        }
     }
     
     @IBAction func capturePhoto(_ sender: UIButton) {
-        // TODO: photoOutput의 capturePhoto 메소드
-
-
+        // photoOutput의 capturePhoto 메소드
+        // orientation
+        // photooutput
+        
+        let videoPreviewLayerOrientation = self.previewView.videoPreviewLayer.connection?.videoOrientation
+        sessionQueue.async {
+            let connection = self.photoOutput.connection(with: .video)
+            connection?.videoOrientation = videoPreviewLayerOrientation!
+            let setting = AVCapturePhotoSettings()
+            self.photoOutput.capturePhoto(with: setting, delegate: self)
+        }
     }
     
     
     func savePhotoLibrary(image: UIImage) {
-        // TODO: capture한 이미지 포토라이브러리에 저장
+        // capture한 이미지 포토라이브러리에 저장
+        PHPhotoLibrary.requestAuthorization { status in
+            if status == .authorized {
+                // save
+                PHPhotoLibrary.shared().performChanges({
+                    PHAssetChangeRequest.creationRequestForAsset(from: image)
+                }) { (success, error) in
+                    print("--> image save \(success)")
+                }
+            } else {
+                // request again
+                print("--> no permission")
+            }
+        }
     }
 }
 
@@ -83,35 +154,72 @@ class CameraViewController: UIViewController {
 extension CameraViewController {
     // MARK: - Setup session and preview
     func setupSession() {
-        // TODO: captureSession 구성하기
-        // - presetSetting 하기
+        //  captureSession 구성하기
+        // - presetSetting 하기 (사진을 찍을 수 있고, 영상을 촬영할 수 있고 해상도도..)
         // - beginConfiguration
         // - Add Video Input
         // - Add Photo Output
         // - commitConfiguration
+        captureSession.sessionPreset = .photo
+        captureSession.beginConfiguration() // 구성 시작
         
-
+        // Add vidio input
+        guard let camera = videoDeviceDiscoverySession.devices.first else {
+            captureSession.commitConfiguration()
+            return
+        }
+        do {
+            let videoDeviceInput = try AVCaptureDeviceInput(device: camera)
+            if captureSession.canAddInput(videoDeviceInput) {
+                captureSession.addInput(videoDeviceInput)
+                self.videoDeviceInput = videoDeviceInput
+            } else {
+                captureSession.commitConfiguration()
+                return
+            }
+        } catch let error {
+            captureSession.commitConfiguration()
+            return
+        }
+        // Add photo Output
+        photoOutput.setPreparedPhotoSettingsArray([AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])], completionHandler: nil)
         
-        
+        if captureSession.canAddOutput(photoOutput) {
+            captureSession.addOutput(photoOutput)
+        } else {
+            captureSession.commitConfiguration()
+            return
+        }
+    
+        captureSession.commitConfiguration() // 구성 완료
     }
     
     
     
     func startSession() {
-        // TODO: session Start
-
+        // session Start
+        sessionQueue.async {
+            if !self.captureSession.isRunning {
+                self.captureSession.startRunning()
+            }
+        }
     }
     
     func stopSession() {
-        // TODO: session Stop
-        
+        // session Stop
+        sessionQueue.async {
+            if !self.captureSession.isRunning {
+                self.captureSession.stopRunning()
+            }
+        }
     }
 }
 
 extension CameraViewController: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        // TODO: capturePhoto delegate method 구현
-        
-        
+        guard error == nil else { return }
+        guard let imageData = photo.fileDataRepresentation() else { return }
+        guard let image = UIImage(data: imageData) else { return }
+        self.savePhotoLibrary(image: image)
     }
 }
